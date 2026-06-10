@@ -16,7 +16,8 @@ SCAN_INTERVAL_HOURS = 1
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 # ── ICT Prompt ────────────────────────────────────────────────────────────────
 ICT_PROMPT = """You are an expert ICT (Inner Circle Trader) crypto analyst.
 
