@@ -255,3 +255,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+logger.error(f"FULL RESPONSE: {resp.status_code} - {data}")
