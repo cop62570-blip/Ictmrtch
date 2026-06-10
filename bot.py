@@ -1,0 +1,279 @@
+import os
+import asyncio
+import logging
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import google.generativeai as genai
+import json
+import re
+
+# ── Config ────────────────────────────────────────────────────────────────────
+BOT_TOKEN   = os.environ.get("BOT_TOKEN", "")
+CHAT_ID     = int(os.environ.get("CHAT_ID", "0"))
+GEMINI_KEY  = os.environ.get("GEMINI_KEY", "")
+SCAN_INTERVAL_HOURS = 1  # auto scan every 1 hour
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+genai.configure(api_key=GEMINI_KEY)
+
+# ── ICT Prompt ────────────────────────────────────────────────────────────────
+ICT_PROMPT = """You are an expert ICT (Inner Circle Trader) crypto analyst.
+
+Analyze the current crypto market and select 10 coins with the STRONGEST ICT setups right now.
+
+ICT scoring (0-100):
+- Order Block (OB) near price: +25pts
+- Fair Value Gap (FVG): +20pts
+- Liquidity Sweep: +20pts
+- Break of Structure/CHoCH: +20pts
+- Volume confirmation: +15pts
+
+Include variety: BTC, ETH + mid caps + high momentum alts.
+
+Return ONLY this exact JSON (no markdown, no extra text):
+{"coins":[{"symbol":"BTC","name":"Bitcoin","price":105000,"change24h":2.1,"score":88,"bias":"bullish","signals":["OB BOUNCE","FVG+","LIQ SWEEP"],"analysis":"تحلیل فارسی: وضعیت ICT در تایم‌فریم ۵ و ۱۵ دقیقه","entry":104800,"tp":107500,"sl":103500}],"market_summary":"خلاصه وضعیت کلی بازار به فارسی در ۲ جمله","top_news":["خبر مهم اول","خبر مهم دوم","خبر مهم سوم"]}
+
+Rules:
+- Exactly 10 coins sorted by score descending
+- analysis field MUST be in Persian (Farsi)
+- market_summary MUST be in Persian
+- top_news: 3 items in Persian about current crypto market
+- Use realistic current prices (approximate)
+- Return ONLY the JSON object"""
+
+# ── Gemini call ───────────────────────────────────────────────────────────────
+async def run_ict_scan() -> dict | None:
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = await asyncio.to_thread(
+            model.generate_content,
+            ICT_PROMPT,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.7,
+                max_output_tokens=3000,
+            )
+        )
+        text = response.text.strip()
+        # Extract JSON
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return None
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        return None
+
+# ── Format message ────────────────────────────────────────────────────────────
+def format_scan_message(data: dict) -> str:
+    now = datetime.now().strftime("%H:%M - %Y/%m/%d")
+    
+    msg = f"🔍 *اسکن ICT — {now}*\n"
+    msg += "━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Market summary
+    if data.get("market_summary"):
+        msg += f"📊 *وضعیت بازار:*\n{data['market_summary']}\n\n"
+    
+    # Top news
+    if data.get("top_news"):
+        msg += "📰 *اخبار مهم:*\n"
+        for news in data["top_news"]:
+            msg += f"• {news}\n"
+        msg += "\n"
+    
+    msg += "━━━━━━━━━━━━━━━━━━━\n"
+    msg += "🏆 *۱۰ سیگنال برتر ICT:*\n\n"
+    
+    coins = data.get("coins", [])
+    for i, coin in enumerate(coins[:10], 1):
+        score = coin.get("score", 0)
+        bias  = coin.get("bias", "neutral")
+        
+        # Score emoji
+        if score >= 80:
+            score_emoji = "🟢"
+        elif score >= 65:
+            score_emoji = "🟡"
+        else:
+            score_emoji = "🔴"
+        
+        # Bias emoji
+        bias_emoji = "📈" if bias == "bullish" else "📉" if bias == "bearish" else "➡️"
+        
+        change = coin.get("change24h", 0)
+        change_str = f"+{change:.1f}%" if change >= 0 else f"{change:.1f}%"
+        change_emoji = "⬆️" if change >= 0 else "⬇️"
+        
+        msg += f"{i}. *{coin.get('symbol','?')}* — {coin.get('name','')}\n"
+        msg += f"   💵 ${coin.get('price',0):,} {change_emoji} {change_str}\n"
+        msg += f"   {score_emoji} امتیاز: *{score}/100* {bias_emoji}\n"
+        
+        signals = coin.get("signals", [])
+        if signals:
+            msg += f"   🎯 {' | '.join(signals)}\n"
+        
+        msg += f"   📝 {coin.get('analysis','')}\n"
+        msg += f"   ✅ ورود: `${coin.get('entry',0):,}` | 🎯 هدف: `${coin.get('tp',0):,}` | ❌ حد ضرر: `${coin.get('sl',0):,}`\n"
+        msg += "\n"
+    
+    msg += "━━━━━━━━━━━━━━━━━━━\n"
+    msg += "⚡️ _اسکنر هوشمند ICT_ | @Altman07\\_bot"
+    
+    return msg
+
+# ── Scan & send ───────────────────────────────────────────────────────────────
+async def scan_and_send(context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
+    target = chat_id or CHAT_ID
+    
+    # Send loading message
+    loading_msg = await context.bot.send_message(
+        chat_id=target,
+        text="⏳ *در حال اسکن بازار...*\nهوش مصنوعی در حال بررسی ۵۰۰ ارز برتر است، لطفاً صبر کنید...",
+        parse_mode="Markdown"
+    )
+    
+    data = await run_ict_scan()
+    
+    # Delete loading message
+    await context.bot.delete_message(chat_id=target, message_id=loading_msg.message_id)
+    
+    if not data or not data.get("coins"):
+        await context.bot.send_message(
+            chat_id=target,
+            text="❌ *خطا در دریافت داده*\nلطفاً دوباره تلاش کنید: /scan",
+            parse_mode="Markdown"
+        )
+        return
+    
+    text = format_scan_message(data)
+    
+    keyboard = [[
+        InlineKeyboardButton("🔄 اسکن مجدد", callback_data="rescan"),
+        InlineKeyboardButton("ℹ️ راهنما", callback_data="help")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Split if too long
+    if len(text) > 4000:
+        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for j, chunk in enumerate(chunks):
+            if j == len(chunks) - 1:
+                await context.bot.send_message(
+                    chat_id=target, text=chunk,
+                    parse_mode="Markdown", reply_markup=reply_markup
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=target, text=chunk, parse_mode="Markdown"
+                )
+    else:
+        await context.bot.send_message(
+            chat_id=target, text=text,
+            parse_mode="Markdown", reply_markup=reply_markup
+        )
+
+# ── Handlers ──────────────────────────────────────────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != CHAT_ID:
+        return
+    text = (
+        "🤖 *ICT Scanner Bot*\n\n"
+        "اسکنر هوشمند بازار کریپتو با استراتژی ICT\n\n"
+        "دستورات:\n"
+        "• /scan — اسکن فوری بازار\n"
+        "• /status — وضعیت ربات\n"
+        "• /help — راهنما\n\n"
+        "⏰ اسکن خودکار: هر ۱ ساعت یکبار"
+    )
+    keyboard = [[InlineKeyboardButton("🔍 شروع اسکن", callback_data="rescan")]]
+    await update.message.reply_text(
+        text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != CHAT_ID:
+        return
+    await scan_and_send(context, update.effective_chat.id)
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != CHAT_ID:
+        return
+    jobs = context.job_queue.get_jobs_by_name("auto_scan")
+    status = "✅ فعال" if jobs else "❌ غیرفعال"
+    await update.message.reply_text(
+        f"🤖 *وضعیت ربات*\n\n"
+        f"• اسکن خودکار: {status}\n"
+        f"• فاصله اسکن: هر {SCAN_INTERVAL_HOURS} ساعت\n"
+        f"• مدل AI: Gemini 1.5 Flash\n"
+        f"• زمان سرور: {datetime.now().strftime('%H:%M:%S')}",
+        parse_mode="Markdown"
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != CHAT_ID:
+        return
+    text = (
+        "📖 *راهنمای ICT Scanner*\n\n"
+        "*امتیازبندی:*\n"
+        "🟢 ۸۰+ — سیگنال قوی\n"
+        "🟡 ۶۵-۷۹ — سیگنال متوسط\n"
+        "🔴 زیر ۶۵ — سیگنال ضعیف\n\n"
+        "*سیگنال‌های ICT:*\n"
+        "• OB — Order Block\n"
+        "• FVG — Fair Value Gap\n"
+        "• LIQ SWEEP — Liquidity Sweep\n"
+        "• CHoCH — Change of Character\n"
+        "• BOS — Break of Structure\n\n"
+        "⚠️ *این ربات صرفاً جنبه آموزشی دارد.*"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != CHAT_ID:
+        return
+    await query.answer()
+    
+    if query.data == "rescan":
+        await scan_and_send(context, query.message.chat_id)
+    elif query.data == "help":
+        text = (
+            "📖 *راهنما:*\n"
+            "🟢 ۸۰+ قوی | 🟡 ۶۵-۷۹ متوسط | 🔴 زیر ۶۵ ضعیف\n\n"
+            "OB=Order Block | FVG=Fair Value Gap\n"
+            "LIQ=Liquidity Sweep | BOS=Break of Structure"
+        )
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+# ── Auto scan job ─────────────────────────────────────────────────────────────
+async def auto_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Auto scan triggered")
+    await scan_and_send(context)
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start",  start))
+    app.add_handler(CommandHandler("scan",   scan_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("help",   help_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Auto scan every 1 hour
+    app.job_queue.run_repeating(
+        auto_scan_job,
+        interval=SCAN_INTERVAL_HOURS * 3600,
+        first=10,  # first scan 10 seconds after start
+        name="auto_scan"
+    )
+    
+    logger.info("ICT Scanner Bot started!")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
