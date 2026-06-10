@@ -49,6 +49,11 @@ MODELS = [
     "meta-llama/llama-3.1-8b-instruct:free",
     "qwen/qwen3-8b:free",
     "deepseek/deepseek-r1-0528:free",
+    MODELS = [
+    "openai/gpt-oss-120b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "openrouter/owl-alpha",
 ]
 
 
