@@ -43,33 +43,65 @@ Rules:
 - Return ONLY the JSON object"""
 
 # ── OpenRouter call ───────────────────────────────────────────────────────────
+MODELS = [
+    "mistralai/mistral-7b-instruct:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-4b-it:free",
+]
+
 async def run_ict_scan() -> dict | None:
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_KEY}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://github.com/ict-bot",
-                    "X-Title": "ICT Scanner Bot"
-                },
-                json={
-                    "model": "meta-llama/llama-3.3-70b-instruct:free",
-                    "messages": [{"role": "user", "content": ICT_PROMPT}],
-                    "max_tokens": 3000,
-                    "temperature": 0.7
-                }
-            )
-            data = resp.json()
-            text = data["choices"][0]["message"]["content"].strip()
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            return None
-    except Exception as e:
-        logger.error(f"OpenRouter error: {e}")
-        return None
+    for model in MODELS:
+        try:
+            logger.info(f"Trying model: {model}")
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_KEY}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://github.com/ict-bot",
+                        "X-Title": "ICT Scanner Bot"
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": ICT_PROMPT}],
+                        "max_tokens": 3000,
+                        "temperature": 0.7
+                    }
+                )
+
+                data = resp.json()
+                logger.info(f"OpenRouter status: {resp.status_code} | model: {model}")
+
+                # بررسی خطای API
+                if resp.status_code != 200:
+                    logger.error(f"API error {resp.status_code}: {data}")
+                    continue
+
+                if "choices" not in data:
+                    logger.error(f"No choices in response: {data}")
+                    continue
+
+                text = data["choices"][0]["message"]["content"].strip()
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match:
+                    result = json.loads(match.group())
+                    if result.get("coins"):
+                        logger.info(f"Success with model: {model}")
+                        return result
+                    else:
+                        logger.error(f"Empty coins in response, trying next model")
+                        continue
+
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parse error with {model}: {e}")
+            continue
+        except Exception as e:
+            logger.error(f"Error with model {model}: {e}")
+            continue
+
+    logger.error("All models failed!")
+    return None
 
 # ── Format message ────────────────────────────────────────────────────────────
 def format_scan_message(data: dict) -> str:
@@ -116,16 +148,20 @@ async def scan_and_send(context: ContextTypes.DEFAULT_TYPE, chat_id: int = None)
     target = chat_id or CHAT_ID
     loading_msg = await context.bot.send_message(
         chat_id=target,
-        text="⏳ *در حال اسکن بازار...*\nلطفاً صبر کنید...",
+        text="⏳ *در حال اسکن بازار...*\nلطفاً صبر کنید (تا ۶۰ ثانیه)...",
         parse_mode="Markdown"
     )
     data = await run_ict_scan()
-    await context.bot.delete_message(chat_id=target, message_id=loading_msg.message_id)
+
+    try:
+        await context.bot.delete_message(chat_id=target, message_id=loading_msg.message_id)
+    except Exception:
+        pass
 
     if not data or not data.get("coins"):
         await context.bot.send_message(
             chat_id=target,
-            text="❌ *خطا در دریافت داده*\nلطفاً دوباره تلاش کنید: /scan",
+            text="❌ *خطا در دریافت داده*\nسرویس AI موقتاً در دسترس نیست.\nلطفاً چند دقیقه صبر کنید و دوباره تلاش کنید: /scan",
             parse_mode="Markdown"
         )
         return
@@ -172,7 +208,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jobs = context.job_queue.get_jobs_by_name("auto_scan")
     status = "✅ فعال" if jobs else "❌ غیرفعال"
     await update.message.reply_text(
-        f"🤖 *وضعیت ربات*\n\n• اسکن خودکار: {status}\n• فاصله: هر {SCAN_INTERVAL_HOURS} ساعت\n• مدل AI: Llama 3.3 70B\n• زمان: {datetime.now().strftime('%H:%M:%S')}",
+        f"🤖 *وضعیت ربات*\n\n• اسکن خودکار: {status}\n• فاصله: هر {SCAN_INTERVAL_HOURS} ساعت\n• مدل AI: Auto Fallback\n• زمان: {datetime.now().strftime('%H:%M:%S')}",
         parse_mode="Markdown"
     )
 
